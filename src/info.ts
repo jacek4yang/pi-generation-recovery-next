@@ -5,6 +5,7 @@ export const STACK_INFO = {
   contractVersion: 1,
   customTypes: {
     checkpoint: "pinx.recovery.checkpoint",
+    attempt: "pinx.recovery.attempt",
   },
   stateRoot: "pinx/generation-recovery-next",
 } as const;
