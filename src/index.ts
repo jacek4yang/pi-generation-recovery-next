@@ -32,7 +32,11 @@ export default function piGenerationRecoveryNext(pi: ExtensionAPI) {
   interface PendingAttempt {
     attemptId: string;
     identity: RecoveryIdentity;
-    prefixText: string;
+    /** The ORIGINAL proven frontier from capture — never a synthetic
+     * reconstruction (regression guard: an empty safePrefix here made every
+     * real recovery fall back, pi-generation-recovery-next bug A). */
+    frontierResult: ReturnType<typeof computeSafeFrontier>;
+    blocks: ContentBlock[];
     injected: boolean;
     attempts: number;
   }
@@ -40,6 +44,9 @@ export default function piGenerationRecoveryNext(pi: ExtensionAPI) {
   let journal: Journal | undefined;
   let sessionId = "";
   let pending: PendingAttempt | undefined;
+  /** Retry-storm guard (V6/V13): after budget exhaustion, chained
+   * interruptions get NO new attempt until a healthy completion occurs. */
+  let chainExhausted = false;
 
   const journalFor = (session: string): Journal => {
     if (!journal)
@@ -94,7 +101,10 @@ export default function piGenerationRecoveryNext(pi: ExtensionAPI) {
           outcome: "recovered",
         });
         pending = undefined;
+        chainExhausted = false; // a healthy completion reopens the ladder
         emit("recovered");
+      } else if (message.stopReason === "stop" || message.stopReason === "toolUse") {
+        chainExhausted = false; // normal healthy work also reopens the ladder
       }
       return;
     }
@@ -120,12 +130,21 @@ export default function piGenerationRecoveryNext(pi: ExtensionAPI) {
       visibleTextChars: frontier.visibleTextChars,
     });
     if (shadow) return;
+    if (chainExhausted) {
+      emit("budget-exhausted", { attemptId });
+      return; // journal the observation, but no new attempt until healthy work
+    }
+    // Consecutive-interruption chaining (V6): a fresh capture while a
+    // recovery is already injected inherits its attempt count, so chained
+    // failures exhaust the budget instead of looping forever.
+    const chainedAttempts = pending?.injected ? pending.attempts : 0;
     pending = {
       attemptId,
       identity,
-      prefixText: safePrefixText(blocks, frontier),
+      frontierResult: frontier,
+      blocks,
       injected: false,
-      attempts: 0,
+      attempts: chainedAttempts,
     };
     emit("captured", { attemptId, frontier: frontier.frontier, chars: frontier.visibleTextChars });
   });
@@ -145,16 +164,13 @@ export default function piGenerationRecoveryNext(pi: ExtensionAPI) {
   pi.on("context", (event, ctx) => {
     if (!pending || pending.injected) return { messages: event.messages };
     const identity = currentIdentity(ctx);
+    // Decide on the ORIGINAL captured frontier — the exact proven state
+    // (regression: a synthetic empty safePrefix made every recovery fall back).
     const decision = planRecovery(
       {
         identity: pending.identity,
         currentIdentity: identity,
-        frontier: {
-          frontier: "COMPLETE_TEXT",
-          safePrefix: [],
-          visibleTextChars: pending.prefixText.length,
-          reasoningBlocks: 0,
-        },
+        frontier: pending.frontierResult,
         committedEffects: new Set(),
         attemptsSoFar: pending.attempts,
         maxAttempts,
@@ -170,6 +186,7 @@ export default function piGenerationRecoveryNext(pi: ExtensionAPI) {
         outcome: "fallback",
         reason: decision.reason,
       });
+      if (/budget exhausted/.test(decision.reason)) chainExhausted = true;
       pending = undefined;
       return { messages: event.messages };
     }
@@ -182,9 +199,10 @@ export default function piGenerationRecoveryNext(pi: ExtensionAPI) {
     }
     pending.injected = true;
     pending.attempts++;
+    const prefixText = safePrefixText(pending.blocks, pending.frontierResult);
     emit("recovering", {
       attemptId: pending.attemptId,
-      chars: pending.prefixText.length,
+      chars: prefixText.length,
       attempt: pending.attempts,
     });
     return {
@@ -195,7 +213,7 @@ export default function piGenerationRecoveryNext(pi: ExtensionAPI) {
           content: `${CONTINUATION_INSTRUCTION}
 
 --- verified completed prefix ---
-${pending.prefixText}`,
+${prefixText}`,
           timestamp: Date.now(),
         },
       ],

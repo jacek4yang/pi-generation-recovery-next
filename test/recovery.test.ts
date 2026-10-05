@@ -37,7 +37,7 @@ function blocks(
   return specs.map((s) => ({ complete: true, text: s.kind === "text" ? "t" : undefined, ...s }));
 }
 
-test("V1: safe completed text prefix is proven and reconstructible", () => {
+test("[V1] V1: safe completed text prefix is proven and reconstructible", () => {
   const r = computeSafeFrontier(
     blocks([
       { kind: "text", text: "alpha " },
@@ -58,7 +58,7 @@ test("V1: safe completed text prefix is proven and reconstructible", () => {
   );
 });
 
-test("V2: thinking blocks are excluded unless the provider adapter verifies them", () => {
+test("[V2] V2: thinking blocks are excluded unless the provider adapter verifies them", () => {
   const withThinking = blocks([
     { kind: "text", text: "a" },
     { kind: "thinking", text: "secret reasoning" },
@@ -71,7 +71,7 @@ test("V2: thinking blocks are excluded unless the provider adapter verifies them
   assert.equal(safePrefixText(withThinking, verifying), "a"); // thinking never enters visible text
 });
 
-test("V3/V4/V5: any tool-call block is a hard barrier — fail closed", () => {
+test("[V3][V4][V5] V3/V4/V5: any tool-call block is a hard barrier — fail closed", () => {
   const partial = computeSafeFrontier(
     blocks([
       { kind: "text", text: "a" },
@@ -100,7 +100,7 @@ test("V3/V4/V5: any tool-call block is a hard barrier — fail closed", () => {
   assert.match(ladder.reason, /V3|V4|V5|side-effect/);
 });
 
-test("V6: consecutive interruptions are bounded by the attempt budget", () => {
+test("[V6] V6: consecutive interruptions are bounded by the attempt budget", () => {
   const frontier = computeSafeFrontier(blocks([{ kind: "text", text: "done text" }]));
   const decision = planRecovery({
     identity: ID,
@@ -115,7 +115,7 @@ test("V6: consecutive interruptions are bounded by the attempt budget", () => {
   assert.match(decision.reason, /budget exhausted/);
 });
 
-test("V7: provider/model/session/branch change invalidates the attempt", () => {
+test("[V7] V7: provider/model/session/branch change invalidates the attempt", () => {
   const frontier = computeSafeFrontier(blocks([{ kind: "text", text: "x" }]));
   const stale: RecoveryIdentity = { ...ID, model: "other-model" };
   const decision = planRecovery({
@@ -133,7 +133,7 @@ test("V7: provider/model/session/branch change invalidates the attempt", () => {
   assert.ok(sameIdentity(ID, { ...ID }));
 });
 
-test("V8: journal survives reopen (read back equals written)", () => {
+test("[V8] V8: journal survives reopen (read back equals written)", () => {
   const dir = mkdtempSync(join(tmpdir(), "pinx-rec-"));
   const file = join(dir, "s1.jsonl");
   const j1 = new Journal(file);
@@ -146,7 +146,7 @@ test("V8: journal survives reopen (read back equals written)", () => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-test("V9: corrupt records fail closed to verified prefix (V9 journal)", () => {
+test("[V9] V9: corrupt records fail closed to verified prefix (V9 journal)", () => {
   const dir = mkdtempSync(join(tmpdir(), "pinx-rec-"));
   const file = join(dir, "s1.jsonl");
   const j1 = new Journal(file);
@@ -162,7 +162,7 @@ test("V9: corrupt records fail closed to verified prefix (V9 journal)", () => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-test("V10: truncated final line is tolerated — earlier records survive", () => {
+test("[V10] V10: truncated final line is tolerated — earlier records survive", () => {
   const dir = mkdtempSync(join(tmpdir(), "pinx-rec-"));
   const file = join(dir, "s1.jsonl");
   const j1 = new Journal(file);
@@ -177,7 +177,7 @@ test("V10: truncated final line is tolerated — earlier records survive", () =>
   rmSync(dir, { recursive: true, force: true });
 });
 
-test("V11: journal quota triggers deterministic GC", () => {
+test("[V11] V11: journal quota triggers deterministic GC", () => {
   const dir = mkdtempSync(join(tmpdir(), "pinx-rec-"));
   const file = join(dir, "s1.jsonl");
   const j = new Journal(file, { maxRecords: 10 });
@@ -187,7 +187,7 @@ test("V11: journal quota triggers deterministic GC", () => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-test("V12: cancellation falls back immediately", () => {
+test("[V12] V12: cancellation falls back immediately", () => {
   const decision = planRecovery({
     identity: ID,
     currentIdentity: ID,
@@ -201,7 +201,7 @@ test("V12: cancellation falls back immediately", () => {
   assert.match(decision.reason, /cancelled/);
 });
 
-test("V13: budget exhaustion fails closed with a precise reason", () => {
+test("[V13] V13: budget exhaustion fails closed with a precise reason", () => {
   const decision = planRecovery({
     identity: ID,
     currentIdentity: ID,

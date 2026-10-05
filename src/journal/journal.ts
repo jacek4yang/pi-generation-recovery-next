@@ -1,7 +1,20 @@
 // Append-only recovery journal (JSONL, hash-chained, bounded).
-// V9 (corruption), V10 (truncated tail tolerated), V11 (quota + GC),
-// V8 (reopen = read back). One file per session; records reference stable
-// generation ids and never contain provider secrets.
+//
+// ONE canonical verification path (verifyRecords) is used by load, read and
+// GC. A record is accepted only when ALL of the following hold:
+//   - valid JSON with the expected record schema;
+//   - sequence semantics: n === previous accepted n + 1 (first record n = 1);
+//   - prev linkage equals the previous accepted record's hash (first: null);
+//   - hash === recordHash(prev, data).
+// Anything else ends verification: read() returns ONLY the longest verified
+// prefix and the journal is marked degraded. Recovery never acts on records
+// beyond the first integrity failure. Appending to a degraded journal throws
+// (fail closed); truncateToVerified() is the explicit repair path.
+//
+// Sequence policy: n is LOCAL to the compacted chain. GC rebuilds the kept
+// segment (renumbered from 1) BEFORE serializing — the bytes on disk are
+// always the rebuilt chain, never stale records. After GC: open, verify,
+// append, close, reopen, verify, append all work.
 
 import { createHash } from "node:crypto";
 import {
@@ -33,12 +46,74 @@ export function recordHash(prev: string | null, data: unknown): string {
     .digest("hex");
 }
 
+export interface VerifyResult<T = unknown> {
+  records: JournalRecord<T>[];
+  degraded: boolean;
+  error?: string;
+}
+
+/** The single canonical verification path. Never trusts JSON.parse alone. */
+export function verifyRecords<T = unknown>(rawLines: string[]): VerifyResult<T> {
+  const records: JournalRecord<T>[] = [];
+  let prevHash: string | null = null;
+  let expectedN = 1;
+  for (let i = 0; i < rawLines.length; i++) {
+    const line = rawLines[i]!;
+    if (!line.trim()) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      return {
+        records,
+        degraded: true,
+        error: `line ${i + 1}: invalid JSON (truncated or corrupt)`,
+      };
+    }
+    const rec = parsed as Partial<JournalRecord<T>>;
+    if (
+      typeof rec !== "object" ||
+      rec === null ||
+      typeof rec.n !== "number" ||
+      typeof rec.hash !== "string" ||
+      !("data" in rec) ||
+      ("prev" in rec && rec.prev !== null && typeof rec.prev !== "string")
+    ) {
+      return { records, degraded: true, error: `line ${i + 1}: invalid record schema` };
+    }
+    if (rec.n !== expectedN) {
+      return {
+        records,
+        degraded: true,
+        error: `line ${i + 1}: sequence break (n=${String(rec.n)}, expected ${expectedN})`,
+      };
+    }
+    if ((rec.prev ?? null) !== prevHash) {
+      return { records, degraded: true, error: `line ${i + 1}: prev linkage broken` };
+    }
+    if (rec.hash !== recordHash(prevHash, rec.data)) {
+      return {
+        records,
+        degraded: true,
+        error: `line ${i + 1}: hash mismatch (data or hash tampered)`,
+      };
+    }
+    records.push(rec as JournalRecord<T>);
+    prevHash = rec.hash;
+    expectedN++;
+  }
+  return { records, degraded: false };
+}
+
 export class Journal {
   private file: string;
   private root: string;
   private count = 0;
   private lastHash: string | null = null;
   private bytes = 0;
+  private degraded: { error: string } | undefined;
+  private maxBytes: number;
+  private maxRecords: number;
 
   constructor(file: string, opts?: { maxBytes?: number; maxRecords?: number }) {
     this.file = file;
@@ -48,27 +123,37 @@ export class Journal {
     this.load();
   }
 
-  private maxBytes: number;
-  private maxRecords: number;
-
   private load(): void {
     if (!existsSync(this.file)) return;
     const text = readFileSync(this.file, "utf8");
     this.bytes = Buffer.byteLength(text, "utf8");
-    // V10: a truncated/corrupt final record is discarded; earlier records survive.
-    for (const line of text.split("\n")) {
-      if (!line.trim()) continue;
-      try {
-        const rec = JSON.parse(line) as JournalRecord;
-        this.count = rec.n;
-        this.lastHash = rec.hash;
-      } catch {
-        break; // partial/corrupt tail — stop reading, keep what verified
-      }
-    }
+    const { records, degraded, error } = verifyRecords(text.split("\n"));
+    this.count = records.length;
+    this.lastHash = records.length > 0 ? records[records.length - 1]!.hash : null;
+    if (degraded) this.degraded = { error: error ?? "degraded" };
+  }
+
+  isDegraded(): { error: string } | undefined {
+    return this.degraded;
+  }
+
+  /** Longest cryptographically + structurally verified prefix. */
+  read<T>(): JournalRecord<T>[] {
+    if (!existsSync(this.file)) return [];
+    return verifyRecords<T>(readFileSync(this.file, "utf8").split("\n")).records;
+  }
+
+  verify<T>(): VerifyResult<T> {
+    if (!existsSync(this.file)) return { records: [], degraded: false };
+    return verifyRecords<T>(readFileSync(this.file, "utf8").split("\n"));
   }
 
   append<T>(data: T): JournalRecord<T> {
+    if (this.degraded) {
+      throw new Error(
+        `JOURNAL_DEGRADED: ${this.degraded.error} — truncateToVerified() before appending`,
+      );
+    }
     if (this.count >= this.maxRecords || this.bytes > this.maxBytes) {
       this.gc();
     }
@@ -87,39 +172,49 @@ export class Journal {
     return rec;
   }
 
-  read(): JournalRecord[] {
-    if (!existsSync(this.file)) return [];
-    const out: JournalRecord[] = [];
-    for (const line of readFileSync(this.file, "utf8").split("\n")) {
-      if (!line.trim()) continue;
-      try {
-        out.push(JSON.parse(line) as JournalRecord);
-      } catch {
-        break;
-      }
-    }
-    return out;
+  /** Explicit repair path: keep only the verified prefix, renumbered from 1. */
+  truncateToVerified(): number {
+    const { records } = this.verify();
+    this.write(records);
+    return records.length;
   }
 
-  /** Deterministic GC: drop the oldest half of records when bounds are hit. */
+  /**
+   * Deterministic GC: keep the newest half, REBUILD the chain (renumbered
+   * from 1 — n is local to the compacted chain), then serialize the rebuilt
+   * records. After GC: open, verify, append, close, reopen, verify, append.
+   */
   private gc(): void {
-    const records = this.read();
-    if (records.length < 2) return;
+    const { records } = this.verify();
     const keep = records.slice(Math.floor(records.length / 2));
-    const lines = keep.map((r) => JSON.stringify(r) + "\n").join("");
-    // Re-anchor the chain after GC: first kept record becomes the new root.
-    for (let i = 0; i < keep.length; i++) {
-      const prev = i === 0 ? null : keep[i - 1]!.hash;
-      keep[i]!.prev = prev;
-      keep[i]!.hash = recordHash(prev, keep[i]!.data);
-    }
-    const tmp = this.file + ".gc.tmp";
-    writeFileSync(tmp, lines, "utf8");
-    rmSync(this.file, { force: true });
-    renameSafe(tmp, this.file);
-    this.count = keep.length;
-    this.lastHash = keep[keep.length - 1]!.hash ?? null;
-    this.bytes = Buffer.byteLength(lines, "utf8");
+    this.write(keep);
+  }
+
+  /** Serialize a rebuilt, renumbered chain atomically (tmp + rename). */
+  private write(records: JournalRecord[]): void {
+    let prevHash: string | null = null;
+    let n = 0;
+    const lines = records.map((r) => {
+      n++;
+      const rec: JournalRecord = {
+        n,
+        prev: prevHash,
+        hash: recordHash(prevHash, r.data),
+        data: r.data,
+      };
+      prevHash = rec.hash;
+      return JSON.stringify(rec) + "\n";
+    });
+    const tmp = this.file + ".tmp";
+    mkdirSync(this.root, { recursive: true });
+    writeFileSync(tmp, lines.join(""), "utf8");
+    renameSync(tmp, this.file);
+    this.count = records.length;
+    // lastHash must be the RECOMPUTED hash of the rebuilt chain, never the
+    // stale pre-GC hash (that was the residual bug after the first fix).
+    this.lastHash = prevHash;
+    this.bytes = Buffer.byteLength(lines.join(""), "utf8");
+    this.degraded = undefined;
   }
 
   static gcSessions(root: string, keepSessions: number): void {
@@ -130,8 +225,4 @@ export class Journal {
     const byMtime = files.map((f) => ({ f, m: statSync(f).mtimeMs })).sort((a, b) => b.m - a.m);
     for (const stale of byMtime.slice(keepSessions)) rmSync(stale.f, { force: true });
   }
-}
-
-function renameSafe(from: string, to: string): void {
-  renameSync(from, to);
 }
