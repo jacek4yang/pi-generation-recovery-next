@@ -11,6 +11,7 @@ import {
 } from "./recovery/frontier.ts";
 import { planRecovery, DEFAULT_LADDER_POLICY } from "./recovery/ladder.ts";
 import { hashToolLoadout, assertIdentityFresh, type RecoveryIdentity } from "./core/identity.ts";
+import { journalBoundary } from "./recovery/journal-boundary.ts";
 
 /**
  * pi-generation-recovery-next — provider-neutral generation recovery.
@@ -44,6 +45,11 @@ export default function piGenerationRecoveryNext(pi: ExtensionAPI) {
   let journal: Journal | undefined;
   let sessionId = "";
   let pending: PendingAttempt | undefined;
+  /** Current context-management generation, tracked through the PUBLIC
+   * pinx.context.status bus event emitted by pi-context-manager. Stays 0
+   * when the producer is absent (identity binding then relies on the other
+   * identity dimensions — documented limitation, not fake binding). */
+  let contextGeneration = 0;
   /** Retry-storm guard (V6/V13): after budget exhaustion, chained
    * interruptions get NO new attempt until a healthy completion occurs. */
   let chainExhausted = false;
@@ -63,7 +69,22 @@ export default function piGenerationRecoveryNext(pi: ExtensionAPI) {
     model: ctx.model?.id ?? "",
     thinkingLevel: ctx.thinkingLevel,
     toolLoadoutHash: hashToolLoadout(pi.getActiveTools()),
-    contextGeneration: 0,
+    contextGeneration,
+  });
+
+  pi.events.on("pinx.context.status", (payload) => {
+    const p = payload as { v?: number; generation?: number };
+    if (p?.v !== 1 || typeof p.generation !== "number") return;
+    if (p.generation !== contextGeneration) {
+      // Context generation changed: an identity dimension of any pending
+      // attempt is now stale (V7 family) — drop it rather than injecting
+      // across an incompatible generation boundary.
+      contextGeneration = p.generation;
+      if (pending) {
+        emit("invalidated", { attemptId: pending.attemptId, reason: "context-generation change" });
+        pending = undefined;
+      }
+    }
   });
 
   const emit = (state: string, extra?: Record<string, unknown>): void => {
@@ -120,15 +141,22 @@ export default function piGenerationRecoveryNext(pi: ExtensionAPI) {
     }));
     const frontier = computeSafeFrontier(blocks);
     const attemptId = `att_${Date.now().toString(36)}_${Math.floor(Math.random() * 1e6).toString(36)}`;
-    journalFor(sessionId).append({
-      kind: "attempt",
-      attemptId,
-      identity,
-      frontier: frontier.frontier,
-      safePrefix: frontier.safePrefix,
-      stopReason: message.stopReason,
-      visibleTextChars: frontier.visibleTextChars,
-    });
+    const appended = journalBoundary(
+      { journal: () => journalFor(sessionId), onCorrupt: ({ reason }) => {
+          emit("journal-corrupt", { reason });
+          journal = undefined; // hard-corrupt bytes left untouched; no recovery from them
+        }, clearPending: () => { pending = undefined; } },
+      (j) => j.append({
+        kind: "attempt",
+        attemptId,
+        identity,
+        frontier: frontier.frontier,
+        safePrefix: frontier.safePrefix,
+        stopReason: message.stopReason,
+        visibleTextChars: frontier.visibleTextChars,
+      }),
+    );
+    if (appended === undefined) return; // contained: no recovery from corrupt journal
     if (shadow) return;
     if (chainExhausted) {
       emit("budget-exhausted", { attemptId });
@@ -179,13 +207,12 @@ export default function piGenerationRecoveryNext(pi: ExtensionAPI) {
       DEFAULT_LADDER_POLICY,
     );
     if (decision.strategy !== "prefix-continuation") {
-      emit("fallback", { attemptId: pending.attemptId, reason: decision.reason });
-      journalFor(sessionId).append({
-        kind: "disposition",
-        attemptId: pending.attemptId,
-        outcome: "fallback",
-        reason: decision.reason,
-      });
+      const attemptId = pending.attemptId;
+      emit("fallback", { attemptId, reason: decision.reason });
+      journalBoundary(
+        { journal: () => journalFor(sessionId), onCorrupt: ({ reason }) => emit("journal-corrupt", { reason }), clearPending: () => { pending = undefined; } },
+        (j) => j.append({ kind: "disposition", attemptId, outcome: "fallback", reason: decision.reason }),
+      );
       if (/budget exhausted/.test(decision.reason)) chainExhausted = true;
       pending = undefined;
       return { messages: event.messages };
@@ -223,7 +250,10 @@ ${prefixText}`,
   pi.registerCommand("generation-recovery-next", {
     description: "Show recovery state and journal statistics",
     handler: async (_args, ctx) => {
-      const records: JournalRecord[] = journal ? journal.read() : [];
+      const records: JournalRecord[] = journalBoundary(
+        { journal: () => journal ?? new Journal(join(getAgentDir(), STACK_INFO.stateRoot, `${sessionId}.jsonl`)), onCorrupt: ({ reason }) => emit("journal-corrupt", { reason }), clearPending: () => {} },
+        (j) => j.read(),
+      ) ?? [];
       const attempts = records.filter(
         (r) => (r.data as { kind?: string }).kind === "attempt",
       ).length;

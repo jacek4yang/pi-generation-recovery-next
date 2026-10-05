@@ -31,9 +31,10 @@ export interface MockAgentDir {
   cleanup: () => void;
 }
 
-export function createMockPi() {
-  const agentDir = mkdtempSync(join(tmpdir(), "pinx-recovery-harness-"));
-  const sessionId = `sess-${Math.random().toString(36).slice(2, 10)}`;
+export function createMockPi(opts: { agentDir?: string; sessionId?: string } = {}) {
+  const ownsAgentDir = !opts.agentDir;
+  const agentDir = opts.agentDir ?? mkdtempSync(join(tmpdir(), "pinx-recovery-harness-"));
+  const sessionId = opts.sessionId ?? `sess-${Math.random().toString(36).slice(2, 10)}`;
   const handlers = new Map<string, Handler[]>();
   const busHandlers = new Map<string, Handler[]>();
   const busLog: Array<{ channel: string; payload: unknown }> = [];
@@ -114,11 +115,15 @@ export function createMockPi() {
     },
   };
 
-  const cleanup = () => rmSync(agentDir, { recursive: true, force: true });
+  const cleanup = () => {
+    if (ownsAgentDir) rmSync(agentDir, { recursive: true, force: true });
+  };
+  const disposeWithoutCleanup = () => {}; // handlers die with the instance; dir survives
   return {
     pi: pi as typeof pi & { default?: unknown },
     agentDir,
     sessionId,
+    disposeWithoutCleanup,
     cleanup,
     busLog,
     appendedEntries,
