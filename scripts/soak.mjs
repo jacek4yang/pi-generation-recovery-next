@@ -18,10 +18,15 @@ recoverExtension(h.pi);
 await h.dispatch("session_start", { reason: "startup" });
 
 const interrupted = {
-  role: "assistant", stopReason: "aborted",
+  role: "assistant",
+  stopReason: "aborted",
   content: [{ type: "text", text: "Investigation complete. The bug is in " + "x".repeat(200) }],
 };
-const completed = { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Fixed." }] };
+const completed = {
+  role: "assistant",
+  stopReason: "stop",
+  content: [{ type: "text", text: "Fixed." }],
+};
 
 let cycles = 0;
 let recoverings = 0;
@@ -46,19 +51,25 @@ if (existsSync(journalDir)) {
 }
 const busEvents = h.busLog.filter((e) => e.channel === "pinx.recovery").length;
 
-console.log(JSON.stringify({
-  soak: "recovery event-path soak (deterministic, no provider)",
-  duration_ms: durationMs,
-  cycles,
-  recovered: recoverings,
-  fallbacks,
-  bus_events: busEvents,
-  journal_bytes: journalBytes,
-  appended_entries: h.appendedEntries.length,
-  assertions: {
-    every_cycle_recovered: recoverings === cycles,
-    no_retry_storm: fallbacks === 0,
-    journal_bounded: journalBytes < 10 * 1024 * 1024,
-  },
-}, null, 2));
+console.log(
+  JSON.stringify(
+    {
+      soak: "recovery event-path soak (deterministic, no provider)",
+      duration_ms: durationMs,
+      cycles,
+      recovered: recoverings,
+      fallbacks,
+      bus_events: busEvents,
+      journal_bytes: journalBytes,
+      appended_entries: h.appendedEntries.length,
+      assertions: {
+        every_cycle_recovered: recoverings === cycles,
+        no_retry_storm: fallbacks === 0,
+        journal_bounded: journalBytes < 10 * 1024 * 1024,
+      },
+    },
+    null,
+    2,
+  ),
+);
 rmSync(process.env.PI_CODING_AGENT_DIR, { recursive: true, force: true });

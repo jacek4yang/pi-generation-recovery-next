@@ -6,12 +6,7 @@
 // durable execution journal; core correctness never depends on it.
 
 export type ExecutionOutcomeState =
-  | "not-started"
-  | "started"
-  | "completed-with-durable-result"
-  | "failed"
-  | "cancelled"
-  | "unknown";
+  "not-started" | "started" | "completed-with-durable-result" | "failed" | "cancelled" | "unknown";
 
 export interface RuntimeOutcomeProbe {
   /** Durable outcome for one tool operation id. Must never infer from

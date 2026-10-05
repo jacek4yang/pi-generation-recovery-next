@@ -57,7 +57,9 @@ export interface VerifyResult<T = unknown> {
 
 /** The single canonical verification path. Never trusts JSON.parse alone. */
 export function verifyRecords<T = unknown>(rawLines: string[]): VerifyResult<T> {
-  const nonEmpty = rawLines.map((line, lineNo) => ({ line, lineNo: lineNo + 1 })).filter((x) => x.line.trim() !== "");
+  const nonEmpty = rawLines
+    .map((line, lineNo) => ({ line, lineNo: lineNo + 1 }))
+    .filter((x) => x.line.trim() !== "");
   const records: JournalRecord<T>[] = [];
   let prevHash: string | null = null;
   let expectedN = 1;
@@ -96,7 +98,12 @@ export function verifyRecords<T = unknown>(rawLines: string[]): VerifyResult<T> 
       !("data" in rec) ||
       ("prev" in rec && rec.prev !== null && typeof rec.prev !== "string")
     ) {
-      return { records, degraded: true, tailTruncated: false, error: `line ${lineNo}: invalid record schema` };
+      return {
+        records,
+        degraded: true,
+        tailTruncated: false,
+        error: `line ${lineNo}: invalid record schema`,
+      };
     }
     if (rec.n !== expectedN) {
       return {
@@ -107,7 +114,12 @@ export function verifyRecords<T = unknown>(rawLines: string[]): VerifyResult<T> 
       };
     }
     if ((rec.prev ?? null) !== prevHash) {
-      return { records, degraded: true, tailTruncated: false, error: `line ${lineNo}: prev linkage broken` };
+      return {
+        records,
+        degraded: true,
+        tailTruncated: false,
+        error: `line ${lineNo}: prev linkage broken`,
+      };
     }
     if (rec.hash !== recordHash(prevHash, rec.data)) {
       return {
