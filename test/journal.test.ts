@@ -131,16 +131,22 @@ test("middle corruption keeps the verified prefix", () => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-test("truncated final line degrades but keeps earlier records (V10)", () => {
+test("V10: truncated final line is classified as recoverable tail truncation", () => {
   const { file, dir } = tmpFile();
   const j = new Journal(file);
   j.append({ id: "complete" });
   j.append({ id: "victim" });
   const raw = readFileSync(file, "utf8");
-  writeFileSync(file, raw.slice(0, raw.length - 10), "utf8");
-  const v = new Journal(file).verify();
-  assert.equal(v.degraded, true);
+  writeFileSync(file, raw.slice(0, raw.length - 10), "utf8"); // simulate crash mid-append
+  const v = j.verify(); // the ORIGINAL file content, pre-repair
+  void raw;
+  assert.equal(v.tailTruncated, true);
+  assert.equal(v.degraded, false);
   assert.equal(v.records.length, 1);
+  // Reopen: load() has auto-repaired the tail — journal continues cleanly.
+  const reopened = new Journal(file);
+  assert.equal(reopened.isDegraded(), undefined);
+  assert.equal(reopened.verify().records.length, 1);
   rmSync(dir, { recursive: true, force: true });
 });
 
@@ -261,5 +267,107 @@ test("maxRecords boundary triggers GC (V11)", () => {
   const j = new Journal(file, { maxRecords: 10 });
   for (let i = 1; i <= 50; i++) j.append({ i });
   assert.ok(new Journal(file).read().length <= 10);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("[V10] truncated final line on reopen auto-recovers safely (no degraded state)", () => {
+  const { file, dir } = tmpFile();
+  const j = new Journal(file);
+  j.append({ id: "complete" });
+  j.append({ id: "victim" });
+  const raw = readFileSync(file, "utf8");
+  writeFileSync(file, raw.slice(0, raw.length - 10), "utf8");
+  const reopened = new Journal(file);
+  assert.equal(reopened.isDegraded(), undefined); // NOT degraded
+  assert.equal(reopened.verify().tailTruncated === true, false); // already repaired at load
+  assert.equal(reopened.verify().records.length, 1);
+  assert.equal((reopened.verify().records[0]!.data as { id: string }).id, "complete");
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("[V10] truncated final line followed by append continues normally", () => {
+  const { file, dir } = tmpFile();
+  const j = new Journal(file);
+  j.append({ id: "complete" });
+  j.append({ id: "victim" });
+  const raw = readFileSync(file, "utf8");
+  writeFileSync(file, raw.slice(0, raw.length - 10), "utf8");
+  const reopened = new Journal(file);
+  reopened.append({ id: "appended-after-crash" });
+  const v = reopened.verify();
+  assert.equal(v.degraded, false);
+  const ids = v.records.map((r) => (r.data as { id: string }).id);
+  assert.deepEqual(ids, ["complete", "appended-after-crash"]);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("[V10] truncated tail then reopen and append again (multi-cycle)", () => {
+  const { file, dir } = tmpFile();
+  for (let cycle = 0; cycle < 3; cycle++) {
+    const j = new Journal(file);
+    j.append({ cycle, phase: "work" });
+    if (cycle < 2) {
+      const raw = readFileSync(file, "utf8");
+      writeFileSync(file, raw.slice(0, raw.length - 5), "utf8"); // simulate crash
+    }
+  }
+  const v = new Journal(file).verify();
+  assert.equal(v.degraded, false);
+  assert.ok(v.records.length >= 1);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("valid prefix remains semantically equivalent after tail repair", () => {
+  const { file, dir } = tmpFile();
+  const j = new Journal(file);
+  j.append({ step: 1 });
+  j.append({ step: 2 });
+  const raw = readFileSync(file, "utf8");
+  writeFileSync(file, raw.slice(0, raw.length - 10), "utf8");
+  const repaired = new Journal(file).read();
+  // The first record's bytes are untouched by tail repair.
+  assert.equal((repaired[0]!.data as { step: number }).step, 1);
+  assert.equal(repaired[0]!.n, 1);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("middle invalid JSON remains HARD corruption (not tail-truncation)", () => {
+  const { file, dir } = tmpFile();
+  const j = new Journal(file);
+  j.append({ a: 1 });
+  j.append({ a: 2 });
+  j.append({ a: 3 });
+  const lines = readFileSync(file, "utf8").split("\n");
+  lines[1] = "{corrupt";
+  writeFileSync(file, lines.join("\n"), "utf8");
+  const v = new Journal(file).verify();
+  assert.equal(v.tailTruncated, false);
+  assert.equal(v.degraded, true);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("valid-JSON tampering remains HARD corruption even in the final line", () => {
+  const { file, dir } = tmpFile();
+  const j = new Journal(file);
+  j.append({ a: 1 });
+  tamperLine(file, 0, (rec) => ({ ...rec, data: { a: "tampered" } }));
+  const v = new Journal(file).verify();
+  assert.equal(v.tailTruncated, false);
+  assert.equal(v.degraded, true);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("GC followed by crash-tail truncation followed by reopen remains valid", () => {
+  const { file, dir } = tmpFile();
+  const j = new Journal(file, { maxRecords: 4 });
+  for (let i = 1; i <= 6; i++) j.append({ i });
+  const raw = readFileSync(file, "utf8");
+  writeFileSync(file, raw.slice(0, raw.length - 7), "utf8");
+  const reopened = new Journal(file);
+  assert.equal(reopened.isDegraded(), undefined);
+  reopened.append({ after: "crash" });
+  const v = new Journal(file).verify();
+  assert.equal(v.degraded, false);
+  assert.equal((v.records[v.records.length - 1]!.data as { after: string }).after, "crash");
   rmSync(dir, { recursive: true, force: true });
 });

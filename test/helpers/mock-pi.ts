@@ -84,7 +84,7 @@ export function createMockPi() {
     events: {
       emit: (channel: string, payload: unknown) => {
         busLog.push({ channel, payload });
-        for (const h of busHandlers.get(channel) ?? []) h(payload);
+        for (const h of busHandlers.get(channel) ?? []) h(payload, makeCtx());
       },
       on: (channel: string, handler: (payload: unknown) => void) => {
         const list = busHandlers.get(channel) ?? [];

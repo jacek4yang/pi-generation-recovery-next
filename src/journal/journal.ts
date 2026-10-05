@@ -50,24 +50,41 @@ export interface VerifyResult<T = unknown> {
   records: JournalRecord<T>[];
   degraded: boolean;
   error?: string;
+  /** True when ONLY the final non-empty line was an incomplete append
+   * (crash-tail): every complete preceding record verified. Recoverable. */
+  tailTruncated: boolean;
 }
 
 /** The single canonical verification path. Never trusts JSON.parse alone. */
 export function verifyRecords<T = unknown>(rawLines: string[]): VerifyResult<T> {
+  const nonEmpty = rawLines.map((line, lineNo) => ({ line, lineNo: lineNo + 1 })).filter((x) => x.line.trim() !== "");
   const records: JournalRecord<T>[] = [];
   let prevHash: string | null = null;
   let expectedN = 1;
-  for (let i = 0; i < rawLines.length; i++) {
-    const line = rawLines[i]!;
-    if (!line.trim()) continue;
+
+  for (let idx = 0; idx < nonEmpty.length; idx++) {
+    const { line, lineNo } = nonEmpty[idx]!;
+    const isFinalLine = idx === nonEmpty.length - 1;
     let parsed: unknown;
     try {
       parsed = JSON.parse(line);
     } catch {
+      // Crash consistency (V10): an incomplete FINAL append is recoverable
+      // tail truncation — every complete preceding record verified. Invalid
+      // JSON anywhere else is hard corruption.
+      if (isFinalLine) {
+        return {
+          records,
+          degraded: false,
+          tailTruncated: true,
+          error: `line ${lineNo}: incomplete final append (recoverable tail truncation)`,
+        };
+      }
       return {
         records,
         degraded: true,
-        error: `line ${i + 1}: invalid JSON (truncated or corrupt)`,
+        tailTruncated: false,
+        error: `line ${lineNo}: invalid JSON (hard corruption)`,
       };
     }
     const rec = parsed as Partial<JournalRecord<T>>;
@@ -79,30 +96,32 @@ export function verifyRecords<T = unknown>(rawLines: string[]): VerifyResult<T> 
       !("data" in rec) ||
       ("prev" in rec && rec.prev !== null && typeof rec.prev !== "string")
     ) {
-      return { records, degraded: true, error: `line ${i + 1}: invalid record schema` };
+      return { records, degraded: true, tailTruncated: false, error: `line ${lineNo}: invalid record schema` };
     }
     if (rec.n !== expectedN) {
       return {
         records,
         degraded: true,
-        error: `line ${i + 1}: sequence break (n=${String(rec.n)}, expected ${expectedN})`,
+        tailTruncated: false,
+        error: `line ${lineNo}: sequence break (n=${String(rec.n)}, expected ${expectedN})`,
       };
     }
     if ((rec.prev ?? null) !== prevHash) {
-      return { records, degraded: true, error: `line ${i + 1}: prev linkage broken` };
+      return { records, degraded: true, tailTruncated: false, error: `line ${lineNo}: prev linkage broken` };
     }
     if (rec.hash !== recordHash(prevHash, rec.data)) {
       return {
         records,
         degraded: true,
-        error: `line ${i + 1}: hash mismatch (data or hash tampered)`,
+        tailTruncated: false,
+        error: `line ${lineNo}: hash mismatch (data or hash tampered)`,
       };
     }
     records.push(rec as JournalRecord<T>);
     prevHash = rec.hash;
     expectedN++;
   }
-  return { records, degraded: false };
+  return { records, degraded: false, tailTruncated: false };
 }
 
 export class Journal {
@@ -127,7 +146,13 @@ export class Journal {
     if (!existsSync(this.file)) return;
     const text = readFileSync(this.file, "utf8");
     this.bytes = Buffer.byteLength(text, "utf8");
-    const { records, degraded, error } = verifyRecords(text.split("\n"));
+    const { records, degraded, error, tailTruncated } = verifyRecords(text.split("\n"));
+    if (tailTruncated) {
+      // Recoverable crash-tail (V10): atomically truncate to the exact
+      // verified prefix and continue normally — no operator intervention.
+      this.write(records);
+      return;
+    }
     this.count = records.length;
     this.lastHash = records.length > 0 ? records[records.length - 1]!.hash : null;
     if (degraded) this.degraded = { error: error ?? "degraded" };
@@ -144,7 +169,7 @@ export class Journal {
   }
 
   verify<T>(): VerifyResult<T> {
-    if (!existsSync(this.file)) return { records: [], degraded: false };
+    if (!existsSync(this.file)) return { records: [], degraded: false, tailTruncated: false };
     return verifyRecords<T>(readFileSync(this.file, "utf8").split("\n"));
   }
 
