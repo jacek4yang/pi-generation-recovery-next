@@ -30,6 +30,10 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 
+/** User-only file semantics, mirroring Pi 1.0.3 output-file policy (POSIX; Windows ignores modes). */
+const USER_ONLY_FILE = 0o600;
+const USER_ONLY_DIR = 0o700;
+
 export interface JournalRecord<T = unknown> {
   n: number;
   prev: string | null;
@@ -201,8 +205,8 @@ export class Journal {
       data,
     };
     const line = JSON.stringify(rec) + "\n";
-    mkdirSync(this.root, { recursive: true });
-    appendFileSync(this.file, line, "utf8");
+    mkdirSync(this.root, { recursive: true, mode: USER_ONLY_DIR });
+    appendFileSync(this.file, line, { encoding: "utf8", mode: USER_ONLY_FILE });
     this.count = rec.n;
     this.lastHash = rec.hash;
     this.bytes += Buffer.byteLength(line, "utf8");
@@ -243,8 +247,8 @@ export class Journal {
       return JSON.stringify(rec) + "\n";
     });
     const tmp = this.file + ".tmp";
-    mkdirSync(this.root, { recursive: true });
-    writeFileSync(tmp, lines.join(""), "utf8");
+    mkdirSync(this.root, { recursive: true, mode: USER_ONLY_DIR });
+    writeFileSync(tmp, lines.join(""), { encoding: "utf8", mode: USER_ONLY_FILE });
     renameSync(tmp, this.file);
     this.count = records.length;
     // lastHash must be the RECOMPUTED hash of the rebuilt chain, never the

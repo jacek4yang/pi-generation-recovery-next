@@ -24,16 +24,17 @@
     "lint": "eslint .",
     "format:check": "prettier --check .",
     "test": "tsx --test test/*.test.ts",
-    "ci": "npm run typecheck && npm run lint && npm run format:check && npm run test",
+    "ci": "npm run check:pi && npm run typecheck && npm run lint && npm run format:check && npm run test",
     "package-smoke": "node scripts/package-smoke.mjs",
-    "smoke:pi": "node scripts/pi-load-smoke.mjs"
+    "smoke:pi": "node scripts/pi-load-smoke.mjs",
+    "check:pi": "node scripts/check-pi-version.mjs"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
     "typebox": "*"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "1.0.2",
+    "@earendil-works/pi-coding-agent": "1.0.3",
     "@types/node": "^24.0.0",
     "eslint": "^10.12.0",
     "prettier": "^3.9.9",
