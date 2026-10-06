@@ -15,7 +15,8 @@ export interface JournalBoundaryDeps {
   clearPending: () => void;
 }
 
-const INTEGRITY_RE = /^JOURNAL_DEGRADED|hash mismatch|prev linkage|sequence break|chain|verified prefix|invalid record schema|invalid JSON \(hard corruption\)/i;
+const INTEGRITY_RE =
+  /^JOURNAL_DEGRADED|hash mismatch|prev linkage|sequence break|chain|verified prefix|invalid record schema|invalid JSON \(hard corruption\)/i;
 
 export function isJournalIntegrityError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
@@ -27,7 +28,10 @@ export function isJournalIntegrityError(error: unknown): boolean {
  * operation result, or undefined when an integrity failure was contained
  * (onCorrupt has run; caller must not continue recovery from corrupt state).
  */
-export function journalBoundary<T>(deps: JournalBoundaryDeps, operation: (journal: Journal) => T): T | undefined {
+export function journalBoundary<T>(
+  deps: JournalBoundaryDeps,
+  operation: (journal: Journal) => T,
+): T | undefined {
   try {
     return operation(deps.journal());
   } catch (error) {

@@ -284,11 +284,7 @@ test("[V9-containment] hard journal corruption cannot escape the callback or inj
     .filter(Boolean)
     .map((l) => JSON.parse(l));
   lines[0].data.tampered = true; // keep old hash → integrity failure on reopen
-  writeFileSync(
-    journalFile,
-    lines.map((l) => JSON.stringify(l)).join("\n") + "\n",
-    "utf8",
-  );
+  writeFileSync(journalFile, lines.map((l) => JSON.stringify(l)).join("\n") + "\n", "utf8");
   h1.disposeWithoutCleanup();
 
   const h = harness({ agentDir: sharedAgentDir, sessionId: h1.sessionId });
